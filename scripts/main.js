@@ -11,20 +11,20 @@ Hooks.on("init", function () {
   // Register Settings
   game.settings.register(MODULE_ID, "visionRange", {
     name: "Vision Range (Grid Units)",
-    hint: "The distance in grid units a player can see clearly.",
+    hint: "The distance in grid units a player can see clearly. You can use spectrums like '0-10-15-20'.",
     scope: "world",
     config: true,
-    type: Number,
-    default: 10
+    type: String,
+    default: "10"
   });
 
   game.settings.register(MODULE_ID, "blurStrength", {
     name: "Blur Strength",
-    hint: "Intensity of the blur effect (1-10).",
+    hint: "Intensity of the blur effect (e.g., '2' or '0-1-2-3').",
     scope: "world",
     config: true,
-    type: Number,
-    default: 2
+    type: String,
+    default: "2"
   });
 
   game.settings.register(MODULE_ID, "gmBlurEnabled", {
@@ -105,43 +105,50 @@ function updateFilter() {
   if (!visionFilter.enabled) return;
 
   // 3. Update Uniforms
-  // We need to re-calculate screen positions every frame because the camera or tokens might move
   const tokensForShader = [];
   const renderer = canvas.app.renderer;
-  const rangeUnits = game.settings.get(MODULE_ID, "visionRange");
-  const rangeWorldPixels = rangeUnits * canvas.dimensions.size;
   const scale = canvas.stage.scale.x;
-  // Normalize range by the MIN dimension, matching the shader's aspect logic
-  const baseRangeUV = (rangeWorldPixels * scale) / Math.min(renderer.width, renderer.height);
+
+  const rawRange = game.settings.get(MODULE_ID, "visionRange");
+  const rawBlur = game.settings.get(MODULE_ID, "blurStrength");
+
+  function parseSpectrum(val) {
+      if (!val) return [0];
+      const parts = String(val).split("-").map(x => parseFloat(x.trim())).filter(x => !isNaN(x));
+      return parts.length > 0 ? parts : [0];
+  }
+
+  const rangeUnitsArray = parseSpectrum(rawRange);
+  const blurStrengthArray = parseSpectrum(rawBlur);
+
+  // Pad the arrays to be equal length if one is longer than the other
+  const maxLen = Math.max(rangeUnitsArray.length, blurStrengthArray.length);
+  while (rangeUnitsArray.length < maxLen) rangeUnitsArray.push(rangeUnitsArray[rangeUnitsArray.length - 1]);
+  while (blurStrengthArray.length < maxLen) blurStrengthArray.push(blurStrengthArray[blurStrengthArray.length - 1]);
+
+  const rangeUVArray = rangeUnitsArray.map(r => ((r * canvas.dimensions.size) * scale) / Math.min(renderer.width, renderer.height));
 
   for (const tData of activeTokensData) {
     const token = tData.token;
     if (!token || !token.visible) continue;
 
-    // Calculate Screen Position
     const screenPos = canvas.stage.transform.worldTransform.apply(token.center);
     const normX = screenPos.x / renderer.width;
     const normY = screenPos.y / renderer.height;
 
-    // If token has "Infinite Vision" (e.g. in Light), we pass a huge range
-    // effectively clearing the screen for this token's contribution.
-    // Otherwise, use the standard configured range.
-    let effectiveRange = baseRangeUV;
-    if (tData.hasClearVision) {
-      effectiveRange = 10.0; // Huge value (10x screen size) to clear everything
-    }
+    let isClear = tData.hasClearVision ? 1.0 : 0.0;
 
     tokensForShader.push({
       pos: [normX, normY],
-      range: effectiveRange
+      clearVision: isClear
     });
   }
 
-  const maxStrength = game.settings.get(MODULE_ID, "blurStrength");
-
   visionFilter.update({
     tokens: tokensForShader,
-    blur: maxStrength * currentBlurFactor
+    ringDistances: rangeUVArray,
+    ringBlurs: blurStrengthArray,
+    transitionFactor: currentBlurFactor
   });
 }
 
