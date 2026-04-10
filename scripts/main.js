@@ -1,12 +1,14 @@
 import { VisionBlurFilter } from "./filter.js";
 
 const MODULE_ID = "vision-blur";
+const LOG = (...args) => console.log("[VB]", ...args);
+const WARN = (...args) => console.warn("[VB]", ...args);
 let visionFilter;
 
-console.log(`${MODULE_ID} | Initializing module`);
+LOG("Script loaded");
 
 Hooks.on("init", function () {
-  console.log(`${MODULE_ID} | Hook: init`);
+  LOG("Hook: init — registering settings");
 
   // Register Settings
   game.settings.register(MODULE_ID, "visionRange", {
@@ -47,30 +49,40 @@ Hooks.on("init", function () {
 });
 
 Hooks.on("canvasReady", async function () {
-  console.log(`${MODULE_ID} | Hook: canvasReady - Initializing Filter`);
+  LOG("Hook: canvasReady — fetching shader and creating filter");
 
   // Load shader source
-  const fragSrc = await fetch(`modules/${MODULE_ID}/scripts/shader.frag`).then(r => r.text());
+  const shaderUrl = `modules/${MODULE_ID}/scripts/shader.frag`;
+  LOG("Fetching shader from:", shaderUrl);
+  const fragSrc = await fetch(shaderUrl).then(r => r.text());
+  LOG(`Shader loaded (${fragSrc.length} chars)`);
 
   // Create Filter
   visionFilter = new VisionBlurFilter(undefined, fragSrc);
+  LOG("VisionBlurFilter created:", visionFilter);
 
   // Add to canvas stage
   canvas.app.stage.filters = [visionFilter];
+  LOG("Filter added to canvas.app.stage.filters");
 
   // Add Ticker to update uniforms relative to token position
   canvas.app.ticker.add(updateFilter);
+  LOG("Ticker registered — filter is live");
 });
 
 // State variables for transition
 let currentBlurFactor = 0; // 0 to 1
 let targetBlurFactor = 0;  // 0 or 1
 let frameCounter = 0;
-const LOGIC_THROTTLE = 10; // Check logic every 10 frames (~6 times/sec @ 60fps)
-const BLUR_SPEED = 0.05;   // Transition speed (lower is slower)
+const LOGIC_THROTTLE = 10;
+const BLUR_SPEED = 0.05;
 
 // Store the calculated token data for the shader
 let activeTokensData = [];
+
+// Throttle uniform-dump logs to once every ~2 seconds (~120 frames)
+let _logUniformCounter = 0;
+const LOG_UNIFORM_THROTTLE = 120;
 
 /**
  * Parse a spectrum string like "0-10-15-20" into an array of numbers.
@@ -102,13 +114,17 @@ function updateFilter() {
 
   // Optimize: Disable filter if effectively off
   if (currentBlurFactor < 0.01 && targetBlurFactor === 0) {
-    if (visionFilter.enabled) visionFilter.enabled = false;
+    if (visionFilter.enabled) {
+      visionFilter.enabled = false;
+      LOG("Filter DISABLED (faded out)");
+    }
     return;
   }
 
   // Enable filter if it should be visible
   if (!visionFilter.enabled && currentBlurFactor > 0.01) {
     visionFilter.enabled = true;
+    LOG("Filter ENABLED (fading in, factor:", currentBlurFactor.toFixed(3), ")");
   }
 
   // If filter is disabled, skip uniform updates
@@ -146,22 +162,39 @@ function updateFilter() {
   }
 
   visionFilter.update({
-    tokens:         tokensForShader,
-    ringDistances:  rangeUVArray,
-    ringBlurs:      blurStrengthArray,
+    tokens:           tokensForShader,
+    ringDistances:    rangeUVArray,
+    ringBlurs:        blurStrengthArray,
     transitionFactor: currentBlurFactor
   });
+
+  // Throttled uniform dump (once every ~2 sec)
+  _logUniformCounter++;
+  if (_logUniformCounter >= LOG_UNIFORM_THROTTLE) {
+    _logUniformCounter = 0;
+    LOG("── Uniform snapshot ──────────────────────────────────");
+    LOG("  rawRange       :", rawRange,  "→", rangeUnitsArray,  "→ UV:", rangeUVArray.map(v => v.toFixed(4)));
+    LOG("  rawBlur        :", rawBlur,   "→", blurStrengthArray);
+    LOG("  ringCount      :", rangeUVArray.length);
+    LOG("  tokenCount     :", tokensForShader.length);
+    LOG("  tokens         :", tokensForShader.map(t => `(${t.pos[0].toFixed(3)},${t.pos[1].toFixed(3)}) clear=${t.clearVision}`));
+    LOG("  targetFactor   :", targetBlurFactor);
+    LOG("  currentFactor  :", currentBlurFactor.toFixed(4));
+    LOG("  filter.enabled :", visionFilter.enabled);
+    LOG("──────────────────────────────────────────────────────");
+  }
 }
 
 function updateTokenLogic() {
   const { isGM } = game.user;
-  const gmEnabled = game.settings.get(MODULE_ID, "gmBlurEnabled");
+  const gmEnabled     = game.settings.get(MODULE_ID, "gmBlurEnabled");
   const darkvisionOnly = game.settings.get(MODULE_ID, "darkvisionBlurOnly");
 
-  activeTokensData = []; // Reset list
+  activeTokensData = [];
 
-  // GM Logic: If disabled for GM, we just stop here (targetBlurFactor = 0)
+  // GM Logic
   if (isGM && !gmEnabled) {
+    if (targetBlurFactor !== 0) LOG("GM with gmBlurEnabled=false → disabling blur");
     targetBlurFactor = 0;
     return;
   }
@@ -190,9 +223,12 @@ function updateTokenLogic() {
 
   // If no candidates, disable blur
   if (candidates.length === 0) {
+    if (targetBlurFactor !== 0) LOG("No candidate tokens found → disabling blur");
     targetBlurFactor = 0;
     return;
   }
+
+  LOG(`Candidates: ${candidates.length} token(s) → [${candidates.map(t => t.name || t.id).join(", ")}]`);
 
   // Process Each Candidate
   let atLeastOneNeedsBlur = false;
@@ -309,26 +345,19 @@ function updateTokenLogic() {
 
   if (darkvisionOnly) {
     const anyInDark = activeTokensData.some(t => !t.hasClearVision);
+    LOG(`darkvisionOnly=true | anyInDark=${anyInDark}`);
 
     if (anyInDark) {
-      // Rule: If ANY in dark, we enforce blur on ALL.
-      // This prevents the "Light" token from clearing the screen.
-      for (const tData of activeTokensData) {
-        tData.hasClearVision = false;
-      }
+      for (const tData of activeTokensData) tData.hasClearVision = false;
       targetBlurFactor = 1;
+      LOG("→ targetBlurFactor = 1 (dark token present)");
     } else {
-      // ALL are in light (or don't have Darkvision mode)
-      // To ensure a smooth fade OUT, we must NOT snap the range to infinite.
-      // We keep 'hasClearVision = false' (Normal Range) and let 
-      // the opacity (uBlurStrength) fade to 0.
-      for (const tData of activeTokensData) {
-        tData.hasClearVision = false;
-      }
+      for (const tData of activeTokensData) tData.hasClearVision = false;
       targetBlurFactor = 0;
+      LOG("→ targetBlurFactor = 0 (all in light)");
     }
   } else {
-    // Normal Mode: Always blur
     targetBlurFactor = 1;
+    LOG("Normal mode → targetBlurFactor = 1");
   }
 }
