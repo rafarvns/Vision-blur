@@ -72,6 +72,16 @@ const BLUR_SPEED = 0.05;   // Transition speed (lower is slower)
 // Store the calculated token data for the shader
 let activeTokensData = [];
 
+/**
+ * Parse a spectrum string like "0-10-15-20" into an array of numbers.
+ * A plain number like "10" returns [10] (backward compatible).
+ */
+function parseSpectrum(val) {
+  if (!val && val !== 0) return [0];
+  const parts = String(val).split("-").map(x => parseFloat(x.trim())).filter(x => !isNaN(x));
+  return parts.length > 0 ? parts : [0];
+}
+
 function updateFilter() {
   if (!visionFilter || !canvas.ready) return;
 
@@ -105,49 +115,40 @@ function updateFilter() {
   if (!visionFilter.enabled) return;
 
   // 3. Update Uniforms
-  const tokensForShader = [];
   const renderer = canvas.app.renderer;
-  const scale = canvas.stage.scale.x;
+  const scale    = canvas.stage.scale.x;
+  const minDim   = Math.min(renderer.width, renderer.height);
 
   const rawRange = game.settings.get(MODULE_ID, "visionRange");
-  const rawBlur = game.settings.get(MODULE_ID, "blurStrength");
+  const rawBlur  = game.settings.get(MODULE_ID, "blurStrength");
 
-  function parseSpectrum(val) {
-      if (!val) return [0];
-      const parts = String(val).split("-").map(x => parseFloat(x.trim())).filter(x => !isNaN(x));
-      return parts.length > 0 ? parts : [0];
-  }
-
-  const rangeUnitsArray = parseSpectrum(rawRange);
+  const rangeUnitsArray   = parseSpectrum(rawRange);
   const blurStrengthArray = parseSpectrum(rawBlur);
 
-  // Pad the arrays to be equal length if one is longer than the other
+  // Pad arrays to equal length (repeat last value)
   const maxLen = Math.max(rangeUnitsArray.length, blurStrengthArray.length);
-  while (rangeUnitsArray.length < maxLen) rangeUnitsArray.push(rangeUnitsArray[rangeUnitsArray.length - 1]);
+  while (rangeUnitsArray.length   < maxLen) rangeUnitsArray.push(rangeUnitsArray[rangeUnitsArray.length - 1]);
   while (blurStrengthArray.length < maxLen) blurStrengthArray.push(blurStrengthArray[blurStrengthArray.length - 1]);
 
-  const rangeUVArray = rangeUnitsArray.map(r => ((r * canvas.dimensions.size) * scale) / Math.min(renderer.width, renderer.height));
+  // Convert grid-unit distances to UV space (normalized by smallest screen dimension)
+  const rangeUVArray = rangeUnitsArray.map(r => (r * canvas.dimensions.size * scale) / minDim);
 
+  const tokensForShader = [];
   for (const tData of activeTokensData) {
     const token = tData.token;
     if (!token || !token.visible) continue;
 
     const screenPos = canvas.stage.transform.worldTransform.apply(token.center);
-    const normX = screenPos.x / renderer.width;
-    const normY = screenPos.y / renderer.height;
-
-    let isClear = tData.hasClearVision ? 1.0 : 0.0;
-
     tokensForShader.push({
-      pos: [normX, normY],
-      clearVision: isClear
+      pos:        [screenPos.x / renderer.width, screenPos.y / renderer.height],
+      clearVision: tData.hasClearVision ? 1.0 : 0.0
     });
   }
 
   visionFilter.update({
-    tokens: tokensForShader,
-    ringDistances: rangeUVArray,
-    ringBlurs: blurStrengthArray,
+    tokens:         tokensForShader,
+    ringDistances:  rangeUVArray,
+    ringBlurs:      blurStrengthArray,
     transitionFactor: currentBlurFactor
   });
 }
