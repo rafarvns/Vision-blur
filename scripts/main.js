@@ -68,6 +68,40 @@ Hooks.on("canvasReady", async function () {
   // Add Ticker to update uniforms relative to token position
   canvas.app.ticker.add(updateFilter);
   LOG("Ticker registered — filter is live");
+
+  // ── Shader compilation check (runs after first render frame) ──────────
+  setTimeout(() => {
+    try {
+      const renderer = canvas.app.renderer;
+      // PIXI v7 uses renderer.gl; v8 may use renderer.context.gl
+      const gl = renderer.gl ?? renderer.context?.gl;
+      if (!gl) { WARN("Cannot access WebGL context — skipping shader check"); return; }
+
+      const prog  = visionFilter.program;
+      const progs = prog?.glPrograms ?? {};
+      const uid   = Object.keys(progs)[0];
+      const glProg = uid !== undefined ? progs[uid] : null;
+
+      if (!glProg) {
+        WARN("GL program not yet compiled after 2s — shader may have failed silently");
+        return;
+      }
+
+      const linked = gl.getProgramParameter(glProg.program, gl.LINK_STATUS);
+      if (linked) {
+        LOG("Shader link status: OK ✓");
+        const fragLog = gl.getShaderInfoLog(glProg.fragmentShader ?? glProg.fs);
+        if (fragLog && fragLog.trim()) LOG("Frag shader info log:", fragLog);
+      } else {
+        WARN("Shader link status: FAILED ✗");
+        WARN("Program log:", gl.getProgramInfoLog(glProg.program));
+        const fragLog = gl.getShaderInfoLog(glProg.fragmentShader ?? glProg.fs);
+        if (fragLog) WARN("Frag shader log:", fragLog);
+      }
+    } catch (e) {
+      WARN("Shader check threw an error:", e);
+    }
+  }, 2000);
 });
 
 // State variables for transition
